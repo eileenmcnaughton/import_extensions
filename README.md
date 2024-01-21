@@ -23,6 +23,9 @@ e.g
 
 Absent this define a sample data set is available for testing.
 
+Note there is no intension to use a setting for the upload folder
+as the define requires command line server access & is more secure.
+
 **JSON**
 
 This is a limited opportunity to pull in data from a very simple
