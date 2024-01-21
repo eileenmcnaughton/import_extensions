@@ -267,7 +267,11 @@ class UploadedFile extends \CRM_Import_DataSource {
   protected function getConfiguredFilePath(): ?string {
     $configuredFilePath = \CRM_Utils_Constant::value('IMPORT_EXTENSIONS_UPLOAD_FOLDER');
     // Only return the directory if it exists...
-    return \CRM_Utils_File::isDir($configuredFilePath) ? $configuredFilePath : NULL;
+    if (!\CRM_Utils_File::isDir($configuredFilePath)) {
+      \Civi::log('import')->warning('Configured file path {path} is not value', ['path' => $configuredFilePath]);
+      return NULL;
+    }
+    return $configuredFilePath;
   }
 
   /**
