@@ -20,6 +20,9 @@ use CRM_ImportExtensions_ExtensionUtil as E;
 /**
  * Objects that implement the DataSource interface can be used in CiviCRM
  * imports.
+ *
+ * @property string $importTableName
+ * @property array $sqlFieldNames
  */
 class UploadedFile extends \CRM_Import_DataSource {
 
@@ -61,7 +64,7 @@ class UploadedFile extends \CRM_Import_DataSource {
     }
     $form->add('hidden', 'hidden_dataSource', 'CRM_Import_DataSource_UploadedFile');
     $form->addElement('checkbox', 'isFirstRowHeader', ts('First row contains column headers'));
-
+    $form->add('text', 'number_of_rows_to_validate', E::ts('Number of rows to upload & validate initially'));
     $fullPathFiles = \CRM_Utils_File::findFiles($this->getResolvedFilePath(), '*.csv');
     foreach ($fullPathFiles as $file) {
       $fileName = basename($file);
@@ -85,7 +88,7 @@ class UploadedFile extends \CRM_Import_DataSource {
    * @return array
    */
   public function getDefaultValues(): array {
-    return ['isFirstRowHeader' => 1];
+    return ['isFirstRowHeader' => 1, 'number_of_rows_to_validate' => 10];
   }
 
   /**
@@ -103,6 +106,7 @@ class UploadedFile extends \CRM_Import_DataSource {
         'table_name' => $result['import_table_name'],
         'column_headers' => $result['column_headers'],
         'number_of_columns' => $result['number_of_columns'],
+        'number_of_rows' => $result['number_of_rows'],
       ]);
     }
     catch (ReaderException $e) {
@@ -123,51 +127,35 @@ class UploadedFile extends \CRM_Import_DataSource {
    * @throws \PhpOffice\PhpSpreadsheet\Reader\Exception
    */
   private function uploadToTable(): array {
-    $filePath = $this->getResolvedFilePath() . DIRECTORY_SEPARATOR . $this->getSubmittedValue('file_name');
-    $file_type = IOFactory::identify($filePath);
-    if ($file_type === 'Csv') {
-      $this->reader = Reader::createFromPath($filePath);
-    }
-    else {
-      // currently only csvs can be selected at the moment but we could do the spreadsheet stuff here.
-      throw new \CRM_Core_Exception('unreachable code reached - buy a lottery ticket');
-    }
-    // Remove the header
-    if ($this->getSubmittedValue('isFirstRowHeader')) {
-      $this->reader->setHeaderOffset(0);
-    }
-    $tableName = $this->createTempTableFromColumns($this->getColumnNamesFromHeaders($this->getColumnNames()));
+    $this->getReader();
+    $this->importTableName = $this->createTempTableFromColumns($this->getSQLFieldNames());
+    $this->addTrackingFieldsToTable($this->importTableName);
     $numColumns = count($this->getColumnNames());
-    // Re-key data using the headers
-    $sql = [];
-    // We only load the first 10 rows in this scenario.
-    $rowsToInsert = 10;
+    $rowsToInsert = $this->getNumberOfRowsToInitiateWith();
+
     foreach ($this->reader->getRecords() as $row) {
-      $row = array_map([__CLASS__, 'trimNonBreakingSpaces'], $row);
-      $row = array_map(['CRM_Core_DAO', 'escapeString'], $row);
-      $sql[] = "('" . implode("', '", $row) . "')";
-      \CRM_Core_DAO::executeQuery("INSERT IGNORE INTO $tableName VALUES " . implode(', ', $sql));
       $rowsToInsert--;
-      if ($rowsToInsert === 0) {
+      if ($rowsToInsert < 0) {
         break;
       }
+      $this->insertRowIntoImportTable($row);
     }
-    $this->addTrackingFieldsToTable($tableName);
 
     return [
-      'import_table_name' => $tableName,
+      'import_table_name' => $this->importTableName,
       'number_of_columns' => $numColumns,
       'column_headers' => $this->getColumnTitles(),
+      'number_of_rows' => $this->reader->count(),
     ];
   }
 
   private function getColumnNames(): array {
     if ($this->getSubmittedValue('isFirstRowHeader')) {
-      $header = $this->reader->getHeader();
+      $header = $this->getReader()->getHeader();
       return array_values($header);
     }
 
-    $row = $this->reader->fetchOne();
+    $row = $this->getReader()->fetchOne();
     $columnsHeaders = [];
     foreach (array_keys($row) as $index) {
       $columnsHeaders[] = ['column_' . $index];
@@ -202,7 +190,63 @@ class UploadedFile extends \CRM_Import_DataSource {
    * @return array
    */
   public function getSubmittableFields(): array {
-    return ['file_name', 'isFirstRowHeader'];
+    return ['file_name', 'isFirstRowHeader', 'number_of_rows_to_validate'];
+  }
+
+  public function getRow(): ?array {
+    $row = parent::getRow();
+    if (empty($row) && $this->getStatuses() === ['new']) {
+     // here we load from the file if there are still rows to load.
+      $remainingRowsToProcess = $this->getRowCount(['new']);
+      if ($remainingRowsToProcess > 0) {
+        // We fetch a row into the table - using the row count in the import table
+        // as the index (ie get the next row not in the table.
+        $rowsAlreadyUploaded = $offset = parent::getRowCount();
+        $initialUpload = $this->getNumberOfRowsToInitiateWith();
+        $numberOfRowsToLoad = $this->getLimit();
+        if ($rowsAlreadyUploaded === $initialUpload) {
+          // We are on the first iteration so we want to deduct our initial load from the number
+          // required to complete the set.
+          $numberOfRowsToLoad -= $initialUpload;
+        }
+        if ($remainingRowsToProcess < $numberOfRowsToLoad) {
+          $numberOfRowsToLoad = $remainingRowsToProcess;
+        }
+
+        $this->setOffset($offset);
+        $this->setLimit($numberOfRowsToLoad);
+
+        while($offset < ( $offset + $numberOfRowsToLoad)) {
+          $this->insertRowIntoImportTable($this->getReader()->fetchOne($offset));
+          $offset++;
+        }
+        return parent::getRow();
+      }
+    }
+    return $row;
+  }
+
+  /**
+   * Get row count.
+   *
+   * The array has all values.
+   *
+   * @param array $statuses
+   *
+   * @return int
+   *
+   * @throws \CRM_Core_Exception
+   */
+  public function getRowCount(array $statuses = []): int {
+    if (empty($statuses)) {
+      return $this->getDataSourceMetadata()['number_of_rows'];
+    }
+    if ($statuses === ['new']) {
+      $numberOfRowsUploadedToTable = parent::getRowCount();
+      $numberOfRowsNotUploaded = $this->getDataSourceMetadata()['number_of_rows'] - $numberOfRowsUploadedToTable;
+      return $numberOfRowsNotUploaded + parent::getRowCount($statuses);
+    }
+    return parent::getRowCount($statuses);
   }
 
   /**
@@ -244,6 +288,72 @@ class UploadedFile extends \CRM_Import_DataSource {
    */
   protected function hasConfiguredFilePath(): bool {
     return (bool) $this->getConfiguredFilePath();
+  }
+
+  /**
+   * @param $row
+   * @param $rowsToInsert
+   * @param string $tableName
+   *
+   * @return void
+   * @throws \Civi\Core\Exception\DBQueryException
+   */
+  private function insertRowIntoImportTable($row): void {
+    $row = array_map([__CLASS__, 'trimNonBreakingSpaces'], $row);
+    $row = array_map(['CRM_Core_DAO', 'escapeString'], $row);
+    $sql = ["('" . implode("', '", $row) . "')"];
+    \CRM_Core_DAO::executeQuery("INSERT IGNORE INTO " . $this->getTableName()
+      . "(" . implode(', ', $this->getSQLFieldNames()) . ")"
+      . " VALUES " . implode(', ', $sql));
+  }
+
+  /**
+   * Get the table name for the import job.
+   *
+   * @return string|null
+   *
+   * @throws \CRM_Core_Exception
+   */
+  protected function getTableName(): ?string {
+    if (!isset($this->importTableName)) {
+      $this->importTableName = parent::getTableName();
+    }
+    return $this->importTableName;
+  }
+
+  /**
+   *
+   * @throws \CRM_Core_Exception
+   * @throws \League\Csv\Exception
+   */
+  public function getReader(): Reader {
+    if (!isset($this->reader)) {
+      $filePath = $this->getResolvedFilePath() . DIRECTORY_SEPARATOR . $this->getSubmittedValue('file_name');
+      $this->reader = Reader::createFromPath($filePath);
+      // Remove the header
+      if ($this->getSubmittedValue('isFirstRowHeader')) {
+        $this->reader->setHeaderOffset(0);
+      }
+    }
+    return $this->reader;
+  }
+
+  /**
+   * @return array
+   */
+  protected function getSQLFieldNames(): array {
+    if (!isset($this->sqlFieldNames)) {
+      $this->sqlFieldNames = $this->getColumnNamesFromHeaders($this->getColumnNames());
+    }
+    return $this->sqlFieldNames;
+  }
+
+  /**
+   * @return int
+   */
+  public function getNumberOfRowsToInitiateWith(): int {
+    // We only load the first 10 rows at the start - the rest are lazy-loaded during the actual import.
+    return $this->getSubmittedValue('number_of_rows_to_validate') ?: 10;
   }
 
 }

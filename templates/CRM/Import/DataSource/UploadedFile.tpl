@@ -9,5 +9,9 @@
       <td class="label">{$form.isFirstRowHeader.label}</td>
       <td>{$form.isFirstRowHeader.html}</td>
     </tr>
+    <tr>
+      <td class="label">{$form.number_of_rows_to_validate.label}</td>
+      <td>{$form.number_of_rows_to_validate.html}</td>
+    </tr>
   </table>
 {/if}
