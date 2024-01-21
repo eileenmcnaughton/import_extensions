@@ -212,13 +212,20 @@ class UploadedFile extends \CRM_Import_DataSource {
         if ($remainingRowsToProcess < $numberOfRowsToLoad) {
           $numberOfRowsToLoad = $remainingRowsToProcess;
         }
-
+        // When we set the limit and offset the query result set is
+        // flushed, causing it to re-load from the database when we call parent::getRow().
+        // We set the offset to the first row we are uploading in this csv-to-table
+        // load and then the limit to the remaining number of rows to load
+        // for this iteration, so the next query will load the rows we are just adding to the
+        // table.
         $this->setOffset($offset);
         $this->setLimit($numberOfRowsToLoad);
 
-        while($offset < ( $offset + $numberOfRowsToLoad)) {
+        // Pull rows into the database, using the offset to specify the line in the file.
+        while ($numberOfRowsToLoad> 0) {
           $this->insertRowIntoImportTable($this->getReader()->fetchOne($offset));
           $offset++;
+          $numberOfRowsToLoad--;
         }
         return parent::getRow();
       }
