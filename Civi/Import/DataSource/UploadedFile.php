@@ -11,11 +11,10 @@
 
 namespace Civi\Import\DataSource;
 
-use GuzzleHttp\Client;
-use PhpOffice\PhpSpreadsheet\IOFactory;
 use PhpOffice\PhpSpreadsheet\Reader\Exception as ReaderException;
 use League\Csv\Reader;
 use CRM_ImportExtensions_ExtensionUtil as E;
+use League\Csv\Statement;
 
 /**
  * Objects that implement the DataSource interface can be used in CiviCRM
@@ -45,7 +44,6 @@ class UploadedFile extends \CRM_Import_DataSource {
       'template' => 'CRM/Import/DataSource/UploadedFile.tpl',
     ];
   }
-
 
   /**
    * This is function is called by the form object to get the DataSource's form
@@ -112,13 +110,6 @@ class UploadedFile extends \CRM_Import_DataSource {
     catch (ReaderException $e) {
       throw new \CRM_Core_Exception(ts('Spreadsheet not loaded.') . '' . $e->getMessage());
     }
-  }
-
-  /**
-   * @return \GuzzleHttp\Client
-   */
-  public function getGuzzleClient(): Client {
-    return $this->guzzleClient ?? new Client(['base_uri' => $this->getSubmittedValue('url')]);
   }
 
   /**
@@ -196,7 +187,7 @@ class UploadedFile extends \CRM_Import_DataSource {
   public function getRow(): ?array {
     $row = parent::getRow();
     if (empty($row) && $this->getStatuses() === ['new']) {
-     // here we load from the file if there are still rows to load.
+      // here we load from the file if there are still rows to load.
       $remainingRowsToProcess = $this->getRowCount(['new']);
       if ($remainingRowsToProcess > 0) {
         // We fetch a row into the table - using the row count in the import table
@@ -218,14 +209,18 @@ class UploadedFile extends \CRM_Import_DataSource {
         // load and then the limit to the remaining number of rows to load
         // for this iteration, so the next query will load the rows we are just adding to the
         // table.
+
         $this->setOffset($offset);
         $this->setLimit($numberOfRowsToLoad);
 
-        // Pull rows into the database, using the offset to specify the line in the file.
-        while ($numberOfRowsToLoad> 0) {
-          $this->insertRowIntoImportTable($this->getReader()->fetchOne($offset));
-          $offset++;
-          $numberOfRowsToLoad--;
+        $stmt = Statement::create()
+          ->offset($offset)
+          ->limit($numberOfRowsToLoad);
+
+        // Pull rows into the database, using the offset to specify the starting line in the file.
+        $rows = $stmt->process($this->getReader());
+        foreach ($rows as $row) {
+          $this->insertRowIntoImportTable($row);
         }
         return parent::getRow();
       }
@@ -275,7 +270,7 @@ class UploadedFile extends \CRM_Import_DataSource {
     $configuredFilePath = \CRM_Utils_Constant::value('IMPORT_EXTENSIONS_UPLOAD_FOLDER');
     // Only return the directory if it exists...
     if (!\CRM_Utils_File::isDir($configuredFilePath)) {
-      \Civi::log('import')->warning('Configured file path {path} is not value', ['path' => $configuredFilePath]);
+      \Civi::log('import')->warning('Configured file path {path} is not valid', ['path' => $configuredFilePath]);
       return NULL;
     }
     return $configuredFilePath;
