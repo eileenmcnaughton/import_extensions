@@ -32,7 +32,7 @@ class UploadedFile extends \CRM_Import_DataSource {
    */
   private Reader $reader;
 
-  private string $importTableName;
+  private ?string $importTableName = NULL;
 
   private array $sqlFieldNames;
 
