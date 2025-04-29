@@ -32,7 +32,7 @@
   <requires>
     <ext>civiimport</ext>
   </requires>
-  <comments>This is a new, undeveloped module</comments>
+  <comments>This allows prior imports (which might have entity IDs) to be re-used in new imports and for large files to be ftp-d up and processed from disk</comments>
   <classloader>
     <psr0 prefix="CRM_" path="."/>
     <psr4 prefix="Civi\" path="Civi"/>
